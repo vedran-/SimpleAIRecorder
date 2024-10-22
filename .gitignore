@@ -1,0 +1,44 @@
+# Rust-specific ignores
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dependency directories
+/vendor/
+
+# Log files
+*.log
+
+# Project-specific ignores
+.env
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.wav
+*.mp3
+/screenshots/
+/recordings/
+
+# Ignore fingerprint files
+.fingerprint/
+
+# Ignore debug build artifacts
+/debug/

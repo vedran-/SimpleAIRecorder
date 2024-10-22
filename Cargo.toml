@@ -1,0 +1,15 @@
+[package]
+name = "screenshot_describer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+autopilot = "0.4.0"
+tokio = { version = "1.28", features = ["full"] }
+dotenv = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+reqwest = { version = "0.11", features = ["json", "multipart"] }
+chrono = "0.4"
+cpal = "0.15"
+hound = "3.5"
+image = { version = "0.24", features = ["png"] }
