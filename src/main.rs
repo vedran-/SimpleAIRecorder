@@ -1,7 +1,7 @@
 use tokio::time::{sleep, Duration};
 use std::env;
 use serde::Deserialize;
-use reqwest::multipart;
+use reqwest::Client;
 use chrono::Local;
 use std::fs;
 use std::io::Write;
@@ -9,15 +9,30 @@ use std::path::Path;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::WavWriter;
 use std::sync::{Arc, Mutex};
+use base64;
+use serde_json::json;
 
-#[derive(Deserialize)]
-struct OpenAIImageResponse {
-    data: Vec<ImageDescription>,
+#[derive(Deserialize, Debug)]
+struct OpenAIResponse {
+    choices: Option<Vec<Choice>>,
+    error: Option<OpenAIError>,
 }
 
-#[derive(Deserialize)]
-struct ImageDescription {
-    description: String,
+#[derive(Deserialize, Debug)]
+struct OpenAIError {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct Choice {
+    message: Message,
+}
+
+#[derive(Deserialize, Debug)]
+struct Message {
+    content: String,
 }
 
 async fn capture_screenshot(output_folder: &str) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
@@ -40,29 +55,57 @@ async fn capture_screenshot(output_folder: &str) -> Result<(Vec<u8>, String), Bo
 
 async fn send_image_to_openai(image_data: Vec<u8>) -> Result<String, Box<dyn std::error::Error>> {
     let api_endpoint = env::var("OPENAI_API_ENDPOINT")
-        .unwrap_or_else(|_| "https://api.openai.com/v1/images/describe".to_string());
+        .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
     let api_key = env::var("OPENAI_API_KEY")?;
-    let client = reqwest::Client::new();
+    let client = Client::new();
 
-    let form = multipart::Form::new()
-        .part("image", multipart::Part::bytes(image_data)
-            .file_name("screenshot.png")
-            .mime_str("image/png")?);
+    let base64_image = base64::encode(&image_data);
+    let payload = json!({
+        "model": env::var("MODEL").unwrap_or_else(|_| "gpt-4-vision-preview".to_string()),
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Describe this image."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/png;base64,{}", base64_image)
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 300
+    });
 
     let response = client
         .post(&api_endpoint)
         .header("Authorization", format!("Bearer {}", api_key))
-        .multipart(form)
+        .json(&payload)
         .send()
-        .await?
-        .json::<OpenAIImageResponse>()
         .await?;
 
-    if let Some(description) = response.data.first() {
-        Ok(description.description.clone())
-    } else {
-        Err("No description found in OpenAI response".into())
+    if !response.status().is_success() {
+        let error_text = response.text().await?;
+        return Err(format!("OpenAI API error: {}", error_text).into());
     }
+
+    let response_body = response.text().await?;
+    println!("OpenAI response: {}", response_body); // Debug print
+
+    let parsed_response: OpenAIResponse = serde_json::from_str(&response_body)?;
+
+    if let Some(error) = parsed_response.error {
+        return Err(format!("OpenAI API error: {} ({})", error.message, error.error_type).into());
+    }
+
+    parsed_response.choices
+        .and_then(|choices| choices.first().map(|choice| choice.message.content.clone()))
+        .ok_or_else(|| "No description found in OpenAI response".into())
 }
 
 async fn save_description(output_folder: &str, filename: &str, description: &str) -> Result<(), Box<dyn std::error::Error>> {
