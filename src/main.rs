@@ -11,6 +11,8 @@ use hound::WavWriter;
 use std::sync::{Arc, Mutex};
 use base64;
 use serde_json::json;
+use tokio::sync::mpsc;
+use x_win::{get_active_window, XWinError};
 
 #[derive(Deserialize, Debug)]
 struct OpenAIResponse {
@@ -40,7 +42,7 @@ async fn capture_screenshot(output_folder: &str) -> Result<(Vec<u8>, String), Bo
     let screenshot = autopilot::bitmap::capture_screen().expect("Unable to capture screen");
 
     let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let filename = format!("screenshot_{}.png", timestamp);
+    let filename = format!("{}_screenshot.png", timestamp);
     let filepath = Path::new(output_folder).join(&filename);
     fs::create_dir_all(output_folder)?;
 
@@ -60,6 +62,7 @@ async fn send_image_to_openai(image_data: Vec<u8>) -> Result<String, Box<dyn std
     let client = Client::new();
 
     let base64_image = base64::encode(&image_data);
+    let custom_prompt = get_ai_vision_prompt();
     let payload = json!({
         "model": env::var("MODEL").unwrap_or_else(|_| "gpt-4-vision-preview".to_string()),
         "messages": [
@@ -68,7 +71,7 @@ async fn send_image_to_openai(image_data: Vec<u8>) -> Result<String, Box<dyn std
                 "content": [
                     {
                         "type": "text",
-                        "text": "Describe this image."
+                        "text": custom_prompt
                     },
                     {
                         "type": "image_url",
@@ -118,7 +121,9 @@ async fn save_description(output_folder: &str, filename: &str, description: &str
 
 async fn record_audio(output_folder: String) -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("No input device available")?;
+    let device = select_microphone(&host).await
+        .unwrap_or_else(|| host.default_input_device()
+        .expect("No input device available"));
     let config = device.default_input_config()?;
 
     let config: cpal::StreamConfig = config.into();
@@ -135,7 +140,7 @@ async fn record_audio(output_folder: String) -> Result<(), Box<dyn std::error::E
         &config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-            let filename = format!("audio_{}.wav", timestamp);
+            let filename = format!("{}_audio.wav", timestamp);
             let filepath = Path::new(&*output_folder_clone).join(&filename);
             let mut writer_lock = writer_clone.lock().unwrap();
             if writer_lock.is_none() {
@@ -169,6 +174,60 @@ async fn record_audio(output_folder: String) -> Result<(), Box<dyn std::error::E
     }
 }
 
+fn get_ai_vision_prompt() -> String {
+    let custom_prompt = env::var("AI_VISION_PROMPT")
+        .unwrap_or_else(|_| "Describe this image of user screen, and try to describe what the user is doing.".to_string());
+    
+    custom_prompt
+}
+
+async fn select_microphone(host: &cpal::Host) -> Option<cpal::Device> {
+    let devices = match host.input_devices() {
+        Ok(devices) => devices.collect::<Vec<_>>(),
+        Err(e) => {
+            eprintln!("Error getting input devices: {}", e);
+            return None;
+        }
+    };
+    
+    if devices.is_empty() {
+        println!("No input devices found.");
+        return None;
+    }
+
+    println!("Available input devices:");
+    for (i, device) in devices.iter().enumerate() {
+        println!("{}. {}", i + 1, device.name().unwrap_or_else(|_| "Unknown".to_string()));
+    }
+
+    println!("Enter the number of the device you want to use (or press Enter for default):");
+    
+    let (tx, mut rx) = mpsc::channel(1);
+    tokio::task::spawn_blocking(move || {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).expect("Failed to read line");
+        tx.blocking_send(input).expect("Failed to send input");
+    });
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await;
+    
+    match input {
+        Ok(Some(choice)) if !choice.trim().is_empty() => {
+            if let Ok(index) = choice.trim().parse::<usize>() {
+                if index > 0 && index <= devices.len() {
+                    return Some(devices[index - 1].clone());
+                }
+            }
+            println!("Invalid choice. Using default device.");
+            None
+        },
+        _ => {
+            println!("No selection made. Using default device.");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
@@ -190,11 +249,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Capturing screenshot...");
         match capture_screenshot(&output_folder).await {
             Ok((image_data, filename)) => {
+
+                let system_info = match get_active_window() {
+                    Ok(active_window) => format!("Active app: {}\nTitle: {}\nExec: {}\nPath: {}", 
+                        active_window.info.name, active_window.title, active_window.info.exec_name, active_window.info.path),
+                    Err(XWinError) => {
+                        eprintln!("Error occurred while getting the active window title");
+                        "Unknown".to_string()
+                    }
+                };
+
                 println!("Sending screenshot to OpenAI...");
                 match send_image_to_openai(image_data).await {
                     Ok(description) => {
                         println!("Description: {}", description);
-                        if let Err(e) = save_description(&output_folder, &filename, &description).await {
+                        let full_description = format!("{}\n\nDescription:\n{}", system_info, description);
+                        if let Err(e) = save_description(&output_folder, &filename, &full_description).await {
                             eprintln!("Error saving description: {}", e);
                         }
                     },
