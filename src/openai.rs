@@ -27,6 +27,8 @@ struct Message {
     content: String,
 }
 
+const DEFAULT_VISION_PROMPT: &str = "Describe this image of user screen, and try to describe what the user is doing in under 20 words.";
+
 pub async fn send_image_to_openai(image_data: Vec<u8>) -> Result<String, Box<dyn std::error::Error>> {
     let api_endpoint = env::var("OPENAI_API_ENDPOINT")
         .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
@@ -83,7 +85,9 @@ pub async fn send_image_to_openai(image_data: Vec<u8>) -> Result<String, Box<dyn
         .ok_or_else(|| "No description found in OpenAI response".into())
 }
 
+/// Returns the AI vision prompt from the AI_VISION_PROMPT environment variable,
+/// or falls back to the default prompt if the environment variable is not set
 fn get_ai_vision_prompt() -> String {
     env::var("AI_VISION_PROMPT")
-        .unwrap_or_else(|_| "Describe this image of user screen, and try to describe what the user is doing.".to_string())
+        .unwrap_or_else(|_| DEFAULT_VISION_PROMPT.to_string())
 }
